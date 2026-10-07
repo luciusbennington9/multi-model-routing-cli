@@ -1,29 +1,86 @@
 # Multi-model image routing CLI
 
-This Python standard-library CLI chooses an image model from a supplied catalog by size, quality preference, and a USD budget. **ArgoLink is used only when its catalog URL is supplied; the chooser is provider-neutral.** The important behavior is dry-run selection, not a hidden network call. Last checked: 2026-10-07.
+This small Python standard-library CLI makes a **dry-run** image-model decision from a local, dated catalog. It is a selection component, not a gateway and not a request executor: it never reads an API key, uploads an image, or sends a billable request. The two deliberately supported choices are the live catalog IDs `nano-banana-2` and `gpt-image-2`.
 
-## Why a catalog input
+## Why a local catalog matters
 
-Model names and effective prices are data, not constants. The CLI reads catalog JSON and ignores a model when it has no numeric effective image price. That makes a stale price visible instead of silently choosing a model. The sample selection recognises Nano Banana and gpt-image IDs, but this is a conservative filter, not a claim that every alias is interchangeable. Extend it only after reading a live catalog.
+Prices and capabilities belong to the catalog, not to source-code constants. Refresh the catalog through the public model-list route (`GET https://argolink.io/v1/models`) in a separately reviewed process, save the JSON with its retrieval time, then pass that file to this command. The selector reads `models[].id`, `models[].category`, `models[].image.resolutions`, and `models[].pricing.effective.tiers`. A tier is ignored when its price is missing or non-numeric, so a stale or incomplete file fails closed instead of silently inventing a rate.
 
-## Run
+The live 2026-10-07 catalog records these effective rates per returned image:
 
-python3 -m router.choose --catalog catalog.json --width 1024 --height 1024 --quality high --budget 0.05 --dry-run
+| Model | 1K | 2K | 4K | Reference-image route |
+| --- | ---: | ---: | ---: | --- |
+| `nano-banana-2` | $0.020 | $0.020 | $0.025 | `POST /v1/images/edits`, up to 14 references |
+| `gpt-image-2` | $0.015 | $0.015 | $0.020 | `POST /v1/images/edits`, up to 16 references |
 
-A catalog row uses models, pricing.effective, and an image tier such as 2k. If the service publishes a different field, add an explicit adapter and test it. The CLI does not fetch catalog data and does not submit an image request; that separation keeps dry-run safe. An execution layer can use the selected ID after the operator reviews the result.
+The table is a snapshot, not a promise that future prices stay the same. Check the catalog revision and model page before a production decision.
 
-## Decision rule
+## Selection rule
 
-The filter first requires a known image-like ID and a numeric tier under budget. High quality prefers a Pro-named candidate if it remains within budget; otherwise the lowest numeric rate wins. Width and height are retained in the output for the downstream validator. The tool does not infer that a 2k price means a specific pixel dimension or that quality names match across providers.
+1. The longest requested edge maps to a tier: up to 1024 pixels is `1k`, 1025–2048 is `2k`, and 2049–4096 is `4k`. Larger requests are rejected so an unverified tier cannot slip through.
+2. Only the two explicit model IDs above are candidates. Other image, video, or provider rows are ignored.
+3. Candidates must declare the requested tier and have a numeric effective price no greater than `--budget`.
+4. `high` prefers `gpt-image-2`; `low` and `medium` prefer `nano-banana-2`. If that preference is unavailable within budget, the other supported model can be selected. Price then breaks ties.
+5. The output records the model, tier, dimensions, budget, estimate, and catalog revision for a job manifest.
 
-## Operational checklist
+“Quality” is a routing preference, not a claim that either model is universally better. Both model pages remain the source of truth for output pixels, reference limits, safety rules, and accepted parameters.
 
-Refresh the catalog before a batch. Record the catalog revision, selected model, dimensions, quality, and estimate in the job manifest. Check the model page for accepted size, reference count, output encoding, and content policy. Apply a concurrency limit in the executor. Failed jobs and ambiguous POST outcomes need explicit provider handling; do not wrap this safe selector in an automatic retry that submits again.
+## Run a safe decision
 
-## Tests and limitations
+```bash
+python3 -m router.choose \
+  --catalog catalog-2026-10-07.json \
+  --width 2048 --height 1152 \
+  --quality high --budget 0.02 --dry-run
+```
 
-python3 -m unittest discover -s tests runs without network access. The test proves a budgeted selection from a local fixture. This repository deliberately does not implement API-key loading, image upload, or billing. Add those in a separate, reviewed executor using a neutral API key and a User-Agent on every request.
+Example output:
 
-## FAQ
+```json
+{
+  "model": "gpt-image-2",
+  "display_name": "GPT Image 2",
+  "tier": "2k",
+  "estimated_usd": 0.015,
+  "width": 2048,
+  "height": 1152,
+  "quality": "high",
+  "budget_usd": 0.02,
+  "selection": "quality preference, then lowest catalog price",
+  "catalog_revision": "2026-10-07"
+}
+```
 
-**Does dry-run call a model?** No. It only reads the provided JSON. **Why was a model skipped?** It had no numeric effective image rate or did not match the conservative filter. **Can I route video?** No; video has a different async lifecycle and billing formula. **Are cheapest images always best?** No; quality, references, and output requirements matter. **Can I use an old catalog?** Only if you label its date and accept that the result is historical.
+`--dry-run` is mandatory as a visible acknowledgement. There is no execution mode in this repository. A separate application may consume the selected ID only after reviewing the manifest, validating the model page, and applying its own idempotency and billing controls.
+
+## Catalog shape
+
+A minimal local fixture looks like this:
+
+```json
+{
+  "generated_at": "2026-10-07",
+  "models": [
+    {
+      "id": "gpt-image-2",
+      "category": "image",
+      "image": {"resolutions": ["1k", "2k", "4k"]},
+      "pricing": {"effective": {"tiers": [
+        {"label": "1K", "price": 0.015},
+        {"label": "2K", "price": 0.015},
+        {"label": "4K", "price": 0.02}
+      ]}}
+    }
+  ]
+}
+```
+
+Do not paste API keys into this file or commit production response payloads. Keep catalog snapshots separate from secrets and label their retrieval date.
+
+## Tests and boundaries
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests are offline and cover tier boundaries, quality preference, budget failure, invalid dimensions, and unknown catalog rows. The selector does not implement retries, uploads, image editing, or a chat/video route. Those behaviors have different contracts and belong in reviewed clients that use `https://argolink.io/v1` and send a descriptive `User-Agent` on every request.
