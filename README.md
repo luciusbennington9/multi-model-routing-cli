@@ -1,41 +1,29 @@
-# Nano Banana Pro — Multi-Model CLI Routing With An Image-Capable Target
+# Multi-model image routing CLI
 
-Argolink-focused multi-model CLI routing with an image-capable target for Nano Banana Pro. This repository is a self-contained integration reference: it explains the request shape, the asynchronous lifecycle where applicable, safe retries, and the failure states that matter in production.
+This Python standard-library CLI chooses an image model from a supplied catalog by size, quality preference, and a USD budget. **ArgoLink is used only when its catalog URL is supplied; the chooser is provider-neutral.** The important behavior is dry-run selection, not a hidden network call. Last checked: 2026-10-07.
 
-[Nano Banana Pro model page →](https://argolink.io/gh-multi-model-routing-cli) · [Argolink API docs →](https://argolink.io/gh-unified-api-docs)
+## Why a catalog input
 
-The model page is authoritative for live availability, pricing, limits, and fields. This repository gives the workflow a searchable home; it does not invent a second model catalog.
+Model names and effective prices are data, not constants. The CLI reads catalog JSON and ignores a model when it has no numeric effective image price. That makes a stale price visible instead of silently choosing a model. The sample selection recognises Nano Banana and gpt-image IDs, but this is a conservative filter, not a claim that every alias is interchangeable. Extend it only after reading a live catalog.
 
-## What is inside
+## Run
 
-- `docs/model-contract.md`: model-specific facts checked against the current Argolink catalog.
-- `docs/workflow.md`: the intent behind this repository and the decision points that prevent accidental resubmission.
-- `examples/request.sh` and `examples/client.py`: safe, runnable request examples using `ARGOLINK_API_KEY`.
-- `tests/test_repository.py`: offline checks for the public contract and examples.
-- `ARGOLINK.md`: public-boundary rules for contributors.
+python3 -m router.choose --catalog catalog.json --width 1024 --height 1024 --quality high --budget 0.05 --dry-run
 
-## Quick start
+A catalog row uses models, pricing.effective, and an image tier such as 2k. If the service publishes a different field, add an explicit adapter and test it. The CLI does not fetch catalog data and does not submit an image request; that separation keeps dry-run safe. An execution layer can use the selected ID after the operator reviews the result.
 
-Set the key only in your shell or secret manager, then run the example:
+## Decision rule
 
-```bash
-export ARGOLINK_API_KEY='your-key'
-./examples/request.sh
-```
+The filter first requires a known image-like ID and a numeric tier under budget. High quality prefers a Pro-named candidate if it remains within budget; otherwise the lowest numeric rate wins. Width and height are retained in the output for the downstream validator. The tool does not infer that a 2k price means a specific pixel dimension or that quality names match across providers.
 
-The example uses model ID `nano-banana-pro` and endpoint family `/v1/images/generations`. Inspect the returned `data` items and persist output URLs or decoded image data according to the response. A timeout does not prove that a request was rejected, so do not submit a second generation automatically.
+## Operational checklist
 
-## Model facts
+Refresh the catalog before a batch. Record the catalog revision, selected model, dimensions, quality, and estimate in the job manifest. Check the model page for accepted size, reference count, output encoding, and content policy. Apply a concurrency limit in the executor. Failed jobs and ambiguous POST outcomes need explicit provider handling; do not wrap this safe selector in an automatic retry that submits again.
 
-- Model ID: `nano-banana-pro`
-- Argolink model page: `https://argolink.io/gh-multi-model-routing-cli` (tracked shortlink; destination is the model page)
-- Endpoint family: `/v1/images/generations`
-- Listed image tiers: 1K `$0.03`/image, 2K `$0.03`/image, 4K `$0.03`/image.
+## Tests and limitations
 
-## Scope
+python3 -m unittest discover -s tests runs without network access. The test proves a budgeted selection from a local fixture. This repository deliberately does not implement API-key loading, image upload, or billing. Add those in a separate, reviewed executor using a neutral API key and a User-Agent on every request.
 
-This repository has one clear search intent: **multi-model CLI routing with an image-capable target**. It keeps the integration boundary small enough for a developer or an AI assistant to answer a concrete question, while linking the live Argolink model page for changes.
+## FAQ
 
-## Safety
-
-Never commit an API key, a returned media URL containing a private token, or production input. Examples are deliberately small and do not make a request during tests.
+**Does dry-run call a model?** No. It only reads the provided JSON. **Why was a model skipped?** It had no numeric effective image rate or did not match the conservative filter. **Can I route video?** No; video has a different async lifecycle and billing formula. **Are cheapest images always best?** No; quality, references, and output requirements matter. **Can I use an old catalog?** Only if you label its date and accept that the result is historical.
